@@ -22,15 +22,15 @@ import (
 	"strings"
 
 	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/auth"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/build"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/daemonset"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/filter"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/metrics"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/module"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/rbac"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/registry"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/sign"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/statusupdater"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
@@ -53,11 +53,11 @@ type ModuleReconciler struct {
 	client.Client
 
 	buildAPI         build.Manager
+	signAPI          sign.SignManager
 	rbacAPI          rbac.RBACCreator
 	daemonAPI        daemonset.DaemonSetCreator
 	kernelAPI        module.KernelMapper
 	metricsAPI       metrics.Metrics
-	registry         registry.Registry
 	filter           *filter.Filter
 	statusUpdaterAPI statusupdater.ModuleStatusUpdater
 }
@@ -65,32 +65,32 @@ type ModuleReconciler struct {
 func NewModuleReconciler(
 	client client.Client,
 	buildAPI build.Manager,
+	signAPI sign.SignManager,
 	rbacAPI rbac.RBACCreator,
 	daemonAPI daemonset.DaemonSetCreator,
 	kernelAPI module.KernelMapper,
 	metricsAPI metrics.Metrics,
 	filter *filter.Filter,
-	registry registry.Registry,
 	statusUpdaterAPI statusupdater.ModuleStatusUpdater) *ModuleReconciler {
 	return &ModuleReconciler{
 		Client:           client,
 		buildAPI:         buildAPI,
+		signAPI:          signAPI,
 		rbacAPI:          rbacAPI,
 		daemonAPI:        daemonAPI,
 		kernelAPI:        kernelAPI,
 		metricsAPI:       metricsAPI,
 		filter:           filter,
-		registry:         registry,
 		statusUpdaterAPI: statusUpdaterAPI,
 	}
 }
 
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=create;delete;get;list;patch;watch
 //+kubebuilder:rbac:groups="core",resources=nodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="core",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="core",resources=configmaps,verbs=get;list
 //+kubebuilder:rbac:groups="core",resources=serviceaccounts,verbs=create;delete;get;list;patch;watch
 //+kubebuilder:rbac:groups="batch",resources=jobs,verbs=create;list;watch;delete
 
@@ -141,12 +141,22 @@ func (r *ModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	for kernelVersion, m := range mappings {
-		requeue, err := r.handleBuild(ctx, mod, m, kernelVersion, m.ContainerImage)
+		requeue, err := r.handleBuild(ctx, mod, m, kernelVersion)
 		if err != nil {
-			return res, fmt.Errorf("failed to handle build for kernel version %s: %w", kernelVersion, err)
+			return res, fmt.Errorf("failed to handle build for kernel version %s: %v", kernelVersion, err)
 		}
 		if requeue {
 			logger.Info("Build requires a requeue; skipping handling driver container for now", "kernelVersion", kernelVersion, "image", m)
+			res.Requeue = true
+			continue
+		}
+
+		signrequeue, err := r.handleSigning(ctx, mod, m, kernelVersion)
+		if err != nil {
+			return res, fmt.Errorf("failed to handle signing for kernel version %s: %v", kernelVersion, err)
+		}
+		if signrequeue {
+			logger.Info("Signing requires a requeue; skipping handling driver container for now", "kernelVersion", kernelVersion, "image", m)
 			res.Requeue = true
 			continue
 		}
@@ -163,14 +173,10 @@ func (r *ModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return res, fmt.Errorf("could handle device plugin: %w", err)
 	}
 
-	logger.Info("Garbage-collecting DaemonSets")
-
-	// Garbage collect old DaemonSets for which there are no nodes.
-	validKernels := sets.StringKeySet(mappings)
-
-	deleted, err := r.daemonAPI.GarbageCollect(ctx, dsByKernelVersion, validKernels)
+	logger.Info("Run garbage collection")
+	err = r.garbageCollect(ctx, mod, mappings, dsByKernelVersion)
 	if err != nil {
-		return res, fmt.Errorf("could not garbage collect DaemonSets: %v", err)
+		return res, fmt.Errorf("failed to run garbage collection: %v", err)
 	}
 
 	err = r.statusUpdaterAPI.ModuleUpdateStatus(ctx, mod, nodesWithMapping, targetedNodes, dsByKernelVersion)
@@ -178,7 +184,7 @@ func (r *ModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return res, fmt.Errorf("failed to update status of the module: %w", err)
 	}
 
-	logger.Info("Garbage-collected DaemonSets", "names", deleted)
+	logger.Info("Reconcile loop finished successfully")
 
 	return res, nil
 }
@@ -235,35 +241,39 @@ func (r *ModuleReconciler) getNodesListBySelector(ctx context.Context, mod *kmmv
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Listing nodes", "selector", mod.Spec.Selector)
 
-	nodes := v1.NodeList{}
+	selectedNodes := v1.NodeList{}
 	opt := client.MatchingLabels(mod.Spec.Selector)
-	if err := r.Client.List(ctx, &nodes, opt); err != nil {
+	if err := r.Client.List(ctx, &selectedNodes, opt); err != nil {
 		logger.Error(err, "Could not list nodes")
 		return nil, fmt.Errorf("could not list nodes: %v", err)
 	}
-	return nodes.Items, nil
+	nodes := make([]v1.Node, 0, len(selectedNodes.Items))
+
+	for _, node := range selectedNodes.Items {
+		if isNodeSchedulable(&node) {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes, nil
 }
 
 func (r *ModuleReconciler) handleBuild(ctx context.Context,
 	mod *kmmv1beta1.Module,
 	km *kmmv1beta1.KernelMapping,
-	kernelVersion string,
-	containerImage string) (bool, error) {
-	if mod.Spec.ModuleLoader.Container.Build == nil && km.Build == nil {
-		return false, nil
-	}
-	exists, err := r.checkImageExists(ctx, mod, km, containerImage)
+	kernelVersion string) (bool, error) {
+
+	shouldSync, err := r.buildAPI.ShouldSync(ctx, *mod, *km)
 	if err != nil {
-		return false, fmt.Errorf("failed to check existence of image %s for kernel %s: %w", containerImage, kernelVersion, err)
+		return false, fmt.Errorf("could not check if build synchronization is needed: %w", err)
 	}
-	if exists {
+	if !shouldSync {
 		return false, nil
 	}
 
-	logger := log.FromContext(ctx).WithValues("kernel version", kernelVersion, "image", containerImage)
+	logger := log.FromContext(ctx).WithValues("kernel version", kernelVersion, "image", km.ContainerImage)
 	buildCtx := log.IntoContext(ctx, logger)
 
-	buildRes, err := r.buildAPI.Sync(buildCtx, *mod, *km, kernelVersion, containerImage, true)
+	buildRes, err := r.buildAPI.Sync(buildCtx, *mod, *km, kernelVersion, true, mod)
 	if err != nil {
 		return false, fmt.Errorf("could not synchronize the build: %w", err)
 	}
@@ -278,14 +288,41 @@ func (r *ModuleReconciler) handleBuild(ctx context.Context,
 	return buildRes.Requeue, nil
 }
 
-func (r *ModuleReconciler) checkImageExists(ctx context.Context, mod *kmmv1beta1.Module, km *kmmv1beta1.KernelMapping, imageName string) (bool, error) {
-	registryAuthGetter := auth.NewRegistryAuthGetterFrom(r.Client, mod)
-	pullOptions := module.GetRelevantPullOptions(mod, km)
-	imageAvailable, err := r.registry.ImageExists(ctx, imageName, pullOptions, registryAuthGetter)
+func (r *ModuleReconciler) handleSigning(ctx context.Context,
+	mod *kmmv1beta1.Module,
+	km *kmmv1beta1.KernelMapping,
+	kernelVersion string) (bool, error) {
+
+	shouldSync, err := r.signAPI.ShouldSync(ctx, *mod, *km)
 	if err != nil {
-		return false, fmt.Errorf("could not check if the image is available: %v", err)
+		return false, fmt.Errorf("cound not check if synchronization is needed: %w", err)
 	}
-	return imageAvailable, nil
+	if !shouldSync {
+		return false, nil
+	}
+
+	// if we need to sign AND we've built, then we must have built the intermediate image so must figure out its name
+	previousImage := ""
+	if module.ShouldBeBuilt(mod.Spec, *km) {
+		previousImage = module.IntermediateImageName(mod.Name, mod.Namespace, km.ContainerImage)
+	}
+
+	logger := log.FromContext(ctx).WithValues("kernel version", kernelVersion, "image", km.ContainerImage)
+	signCtx := log.IntoContext(ctx, logger)
+
+	signRes, err := r.signAPI.Sync(signCtx, *mod, *km, kernelVersion, previousImage, true, mod)
+	if err != nil {
+		return false, fmt.Errorf("could not synchronize the signing: %w", err)
+	}
+
+	switch signRes.Status {
+	case utils.StatusCreated:
+		r.metricsAPI.SetCompletedStage(mod.Name, mod.Namespace, kernelVersion, metrics.SignStage, false)
+	case utils.StatusCompleted:
+		r.metricsAPI.SetCompletedStage(mod.Name, mod.Namespace, kernelVersion, metrics.SignStage, true)
+	}
+
+	return signRes.Requeue, nil
 }
 
 func (r *ModuleReconciler) handleDriverContainer(ctx context.Context,
@@ -350,6 +387,32 @@ func (r *ModuleReconciler) handleDevicePlugin(ctx context.Context, mod *kmmv1bet
 	return err
 }
 
+func (r *ModuleReconciler) garbageCollect(ctx context.Context,
+	mod *kmmv1beta1.Module,
+	mappings map[string]*kmmv1beta1.KernelMapping,
+	existingDS map[string]*appsv1.DaemonSet) error {
+	logger := log.FromContext(ctx)
+	// Garbage collect old DaemonSets for which there are no nodes.
+	validKernels := sets.StringKeySet(mappings)
+
+	deleted, err := r.daemonAPI.GarbageCollect(ctx, existingDS, validKernels)
+	if err != nil {
+		return fmt.Errorf("could not garbage collect DaemonSets: %v", err)
+	}
+
+	logger.Info("Garbage-collected DaemonSets", "names", deleted)
+
+	// Garbage collect for successfully finished build jobs
+	deleted, err = r.buildAPI.GarbageCollect(ctx, mod.Name, mod.Namespace)
+	if err != nil {
+		return fmt.Errorf("could not garbage collect build objects: %v", err)
+	}
+
+	logger.Info("Garbage-collected Build objects", "names", deleted)
+
+	return nil
+}
+
 func (r *ModuleReconciler) setKMMOMetrics(ctx context.Context) {
 	logger := log.FromContext(ctx)
 
@@ -387,4 +450,13 @@ func (r *ModuleReconciler) SetupWithManager(mgr ctrl.Manager, kernelLabel string
 		).
 		Named("module").
 		Complete(r)
+}
+
+func isNodeSchedulable(node *v1.Node) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect == v1.TaintEffectNoSchedule {
+			return false
+		}
+	}
+	return true
 }

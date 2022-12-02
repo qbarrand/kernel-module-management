@@ -13,6 +13,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -229,6 +230,38 @@ var _ = Describe("NodeKernelReconcilerPredicate", func() {
 	})
 })
 
+var _ = Describe("NodeUpdateKernelChangedPredicate", func() {
+	updateFunc := NodeUpdateKernelChangedPredicate().Update
+
+	node1 := v1.Node{
+		Status: v1.NodeStatus{
+			NodeInfo: v1.NodeSystemInfo{KernelVersion: "v1"},
+		},
+	}
+
+	node2 := v1.Node{
+		Status: v1.NodeStatus{
+			NodeInfo: v1.NodeSystemInfo{KernelVersion: "v2"},
+		},
+	}
+
+	DescribeTable(
+		"should work as expected",
+		func(updateEvent event.UpdateEvent, expectedResult bool) {
+			Expect(
+				updateFunc(updateEvent),
+			).To(
+				Equal(expectedResult),
+			)
+		},
+		Entry(nil, event.UpdateEvent{ObjectOld: &v1.Pod{}, ObjectNew: &v1.Node{}}, false),
+		Entry(nil, event.UpdateEvent{ObjectOld: &v1.Node{}, ObjectNew: &v1.Pod{}}, false),
+		Entry(nil, event.UpdateEvent{ObjectOld: &v1.Node{}, ObjectNew: &v1.Pod{}}, false),
+		Entry(nil, event.UpdateEvent{ObjectOld: &node1, ObjectNew: &node1}, false),
+		Entry(nil, event.UpdateEvent{ObjectOld: &node1, ObjectNew: &node2}, true),
+	)
+})
+
 var _ = Describe("FindModulesForNode", func() {
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
@@ -303,6 +336,87 @@ var _ = Describe("FindModulesForNode", func() {
 		}
 
 		reqs := p.FindModulesForNode(&node)
+		Expect(reqs).To(Equal([]reconcile.Request{expectedReq}))
+	})
+})
+
+var _ = Describe("FindManagedClusterModulesForCluster", func() {
+	BeforeEach(func() {
+		ctrl = gomock.NewController(GinkgoT())
+		clnt = mockClient.NewMockClient(ctrl)
+	})
+
+	It("should return nothing if there are no ManagedClusterModules", func() {
+		clnt.EXPECT().List(context.Background(), gomock.Any(), gomock.Any())
+
+		p := New(clnt, logr.Discard())
+		Expect(
+			p.FindManagedClusterModulesForCluster(&clusterv1.ManagedCluster{}),
+		).To(
+			BeEmpty(),
+		)
+	})
+
+	It("should return nothing if the cluster labels match no ManagedClusterModule", func() {
+		mod := kmmv1beta1.ManagedClusterModule{
+			Spec: kmmv1beta1.ManagedClusterModuleSpec{
+				Selector: map[string]string{"key": "value"},
+			},
+		}
+
+		clnt.EXPECT().List(context.Background(), gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ interface{}, list *kmmv1beta1.ManagedClusterModuleList, _ ...interface{}) error {
+				list.Items = []kmmv1beta1.ManagedClusterModule{mod}
+				return nil
+			},
+		)
+
+		p := New(clnt, logr.Discard())
+
+		Expect(
+			p.FindManagedClusterModulesForCluster(&clusterv1.ManagedCluster{}),
+		).To(
+			BeEmpty(),
+		)
+	})
+
+	It("should return only ManagedClusterModules matching the cluster", func() {
+		clusterLabels := map[string]string{"key": "value"}
+
+		cluster := clusterv1.ManagedCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: clusterLabels,
+			},
+		}
+
+		matchingMod := kmmv1beta1.ManagedClusterModule{
+			ObjectMeta: metav1.ObjectMeta{Name: "matching-mod"},
+			Spec: kmmv1beta1.ManagedClusterModuleSpec{
+				Selector: clusterLabels,
+			},
+		}
+
+		mod := kmmv1beta1.ManagedClusterModule{
+			ObjectMeta: metav1.ObjectMeta{Name: "mod"},
+			Spec: kmmv1beta1.ManagedClusterModuleSpec{
+				Selector: map[string]string{"other-key": "other-value"},
+			},
+		}
+
+		clnt.EXPECT().List(context.Background(), gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ interface{}, list *kmmv1beta1.ManagedClusterModuleList, _ ...interface{}) error {
+				list.Items = []kmmv1beta1.ManagedClusterModule{matchingMod, mod}
+				return nil
+			},
+		)
+
+		p := New(clnt, logr.Discard())
+
+		expectedReq := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: matchingMod.Name},
+		}
+
+		reqs := p.FindManagedClusterModulesForCluster(&cluster)
 		Expect(reqs).To(Equal([]reconcile.Request{expectedReq}))
 	})
 })

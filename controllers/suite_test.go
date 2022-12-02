@@ -19,10 +19,11 @@ package controllers
 import (
 	"testing"
 
-	"github.com/kubernetes-sigs/kernel-module-management/internal/test"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/kubernetes-sigs/kernel-module-management/internal/test"
 	//+kubebuilder:scaffold:imports
 )
 

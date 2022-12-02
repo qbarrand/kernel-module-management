@@ -26,6 +26,35 @@ rules:
   - list
   - watch
 - apiGroups:
+  - cluster.open-cluster-management.io
+  resourceNames:
+  - kernel-versions.kmm.node.kubernetes.io
+  resources:
+  - clusterclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cluster.open-cluster-management.io
+  resources:
+  - managedclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+- apiGroups:
   - ""
   resources:
   - nodes
@@ -65,10 +94,8 @@ rules:
 - apiGroups:
   - kmm.sigs.k8s.io
   resources:
-  - modules
+  - managedclustermodules
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -77,9 +104,27 @@ rules:
 - apiGroups:
   - kmm.sigs.k8s.io
   resources:
-  - modules/finalizers
+  - managedclustermodules/finalizers
   verbs:
   - update
+- apiGroups:
+  - kmm.sigs.k8s.io
+  resources:
+  - managedclustermodules/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - kmm.sigs.k8s.io
+  resources:
+  - modules
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - kmm.sigs.k8s.io
   resources:
@@ -108,3 +153,15 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - work.open-cluster-management.io
+  resources:
+  - manifestworks
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

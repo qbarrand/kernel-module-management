@@ -54,6 +54,24 @@ func (f *Filter) NodeKernelReconcilerPredicate(labelName string) predicate.Predi
 	return predicate.And(skipDeletions, labelMismatch)
 }
 
+func NodeUpdateKernelChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
+			oldNode, ok := updateEvent.ObjectOld.(*v1.Node)
+			if !ok {
+				return false
+			}
+
+			newNode, ok := updateEvent.ObjectNew.(*v1.Node)
+			if !ok {
+				return false
+			}
+
+			return oldNode.Status.NodeInfo.KernelVersion != newNode.Status.NodeInfo.KernelVersion
+		},
+	}
+}
+
 func (f *Filter) FindModulesForNode(node client.Object) []reconcile.Request {
 	logger := f.logger.WithValues("node", node.GetName())
 
@@ -97,6 +115,59 @@ func (f *Filter) FindModulesForNode(node client.Object) []reconcile.Request {
 		}
 
 		nsn := types.NamespacedName{Name: mod.Name, Namespace: mod.Namespace}
+
+		reqs = append(reqs, reconcile.Request{NamespacedName: nsn})
+	}
+
+	logger.Info("Adding reconciliation requests", "count", len(reqs))
+	logger.V(1).Info("New requests", "requests", reqs)
+
+	return reqs
+}
+
+func (f *Filter) FindManagedClusterModulesForCluster(cluster client.Object) []reconcile.Request {
+	logger := f.logger.WithValues("managedcluster", cluster.GetName())
+
+	reqs := make([]reconcile.Request, 0)
+
+	logger.Info("Listing all ManagedClusterModules")
+
+	mods := kmmv1beta1.ManagedClusterModuleList{}
+
+	if err := f.client.List(context.Background(), &mods); err != nil {
+		logger.Error(err, "could not list ManagedClusterModules")
+		return reqs
+	}
+
+	logger.Info("Listed ManagedClusterModules", "count", len(mods.Items))
+
+	clusterLabelsSet := labels.Set(cluster.GetLabels())
+
+	for _, mod := range mods.Items {
+		logger := logger.WithValues("ManagedClusterModule name", mod.Name)
+
+		logger.V(1).Info("Processing ManagedClusterModule")
+
+		sel := labels.NewSelector()
+
+		for k, v := range mod.Spec.Selector {
+			logger.V(1).Info("Processing selector item", "key", k, "value", v)
+
+			requirement, err := labels.NewRequirement(k, selection.Equals, []string{v})
+			if err != nil {
+				logger.Error(err, "could not generate requirement: %v", err)
+				return reqs
+			}
+
+			sel = sel.Add(*requirement)
+		}
+
+		if !sel.Matches(clusterLabelsSet) {
+			logger.V(1).Info("Cluster labels do not match the ManagedClusterModule's selector; skipping")
+			continue
+		}
+
+		nsn := types.NamespacedName{Name: mod.Name}
 
 		reqs = append(reqs, reconcile.Request{NamespacedName: nsn})
 	}

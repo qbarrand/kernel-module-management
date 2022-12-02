@@ -1,0 +1,25 @@
+apiVersion: kmm.sigs.k8s.io/v1beta1
+kind: Module
+metadata:
+  name: kmm-ci-a
+spec:
+  moduleLoader:
+    container:
+      modprobe:
+        moduleName: kmm-ci-a 
+
+      kernelMappings:
+        - regexp: '^.+.gke$'
+          containerImage: <aws_account>.dkr.ecr.<aws_region>.amazonaws.com/kmmo-lab:1.22-gke
+          build:
+            buildArgs:
+              - name: CI_BUILD_ARG
+                value: some-build-arg
+            dockerfileConfigMap:
+              name: build-module 
+            
+  imageRepoSecret: 
+    name: aws-repo-secret  
+  selector:  
+    kubernetes.io/hostname: gke-kmmo-lab-cluster-default-pool-073f8f9f-9z5s 
+

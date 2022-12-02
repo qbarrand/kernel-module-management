@@ -25,6 +25,7 @@ import (
 
 	"github.com/kubernetes-sigs/kernel-module-management/internal/build"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/build/job"
+
 	"github.com/kubernetes-sigs/kernel-module-management/internal/daemonset"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/filter"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/metrics"
@@ -32,21 +33,25 @@ import (
 	"github.com/kubernetes-sigs/kernel-module-management/internal/preflight"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/rbac"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/registry"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/sign"
+	signjob "github.com/kubernetes-sigs/kernel-module-management/internal/sign/job"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/statusupdater"
-	"k8s.io/klog/v2/klogr"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/utils"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
-	"github.com/kubernetes-sigs/kernel-module-management/controllers"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/klogr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+
+	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
+	"github.com/kubernetes-sigs/kernel-module-management/controllers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -93,14 +98,23 @@ func main() {
 
 	setupLogger.Info("Creating manager", "git commit", commit)
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	options := ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "c5baf8af.sigs.k8s.io",
-	})
+	}
+	if configFile != "" {
+		options, err = options.AndFrom(ctrl.ConfigFile().AtPath(configFile))
+		if err != nil {
+			setupLogger.Error(err, "unable to load the config file")
+			os.Exit(1)
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), options)
 	if err != nil {
 		setupLogger.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -123,8 +137,18 @@ func main() {
 	metricsAPI.Register()
 	registryAPI := registry.NewRegistry()
 	helperAPI := build.NewHelper()
-	makerAPI := job.NewMaker(helperAPI, scheme)
-	buildAPI := job.NewBuildManager(client, makerAPI, helperAPI)
+	jobHelperAPI := utils.NewJobHelper(client)
+	makerAPI := job.NewMaker(client, helperAPI, jobHelperAPI, scheme)
+	buildAPI := job.NewBuildManager(client, makerAPI, jobHelperAPI, registryAPI)
+
+	signHelperAPI := sign.NewSignerHelper()
+	signAPI := signjob.NewSignJobManager(
+		client,
+		signjob.NewSigner(scheme, signHelperAPI, jobHelperAPI),
+		utils.NewJobHelper(client),
+		registryAPI,
+	)
+
 	rbacAPI := rbac.NewCreator(client, scheme)
 	daemonAPI := daemonset.NewCreator(client, kernelLabel, scheme)
 	kernelAPI := module.NewKernelMapper()
@@ -132,7 +156,7 @@ func main() {
 	preflightStatusUpdaterAPI := statusupdater.NewPreflightStatusUpdater(client)
 	preflightAPI := preflight.NewPreflightAPI(client, buildAPI, registryAPI, preflightStatusUpdaterAPI, kernelAPI)
 
-	mc := controllers.NewModuleReconciler(client, buildAPI, rbacAPI, daemonAPI, kernelAPI, metricsAPI, filter, registryAPI, moduleStatusUpdaterAPI)
+	mc := controllers.NewModuleReconciler(client, buildAPI, signAPI, rbacAPI, daemonAPI, kernelAPI, metricsAPI, filter, moduleStatusUpdaterAPI)
 
 	if err = mc.SetupWithManager(mgr, kernelLabel); err != nil {
 		setupLogger.Error(err, "unable to create controller", "controller", "Module")
