@@ -17,26 +17,19 @@ limitations under the License.
 package main
 
 import (
-	"errors"
 	"flag"
-	"fmt"
 	"os"
-	"runtime/debug"
 
-	"github.com/kubernetes-sigs/kernel-module-management/internal/build"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/build/job"
-
+	"github.com/kubernetes-sigs/kernel-module-management/controllers"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/binutils"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/constants"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/daemonset"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/filter"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/metrics"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/module"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/preflight"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/rbac"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/registry"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/sign"
-	signjob "github.com/kubernetes-sigs/kernel-module-management/internal/sign/job"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/statusupdater"
-	"github.com/kubernetes-sigs/kernel-module-management/internal/utils"
+	clusterv1 "open-cluster-management.io/api/cluster/v1"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -51,7 +44,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
-	"github.com/kubernetes-sigs/kernel-module-management/controllers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -59,8 +51,8 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
 	utilruntime.Must(kmmv1beta1.AddToScheme(scheme))
+	utilruntime.Must(clusterv1.Install(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -84,13 +76,13 @@ func main() {
 
 	flag.Parse()
 
-	logger := klogr.New()
+	logger := klogr.New().WithName("kmm-spoke")
 
 	ctrl.SetLogger(logger)
 
 	setupLogger := logger.WithName("setup")
 
-	commit, err := gitCommit()
+	commit, err := binutils.GitCommit()
 	if err != nil {
 		setupLogger.Error(err, "Could not get the git commit; using <undefined>")
 		commit = "<undefined>"
@@ -124,9 +116,7 @@ func main() {
 
 	filter := filter.New(client, mgr.GetLogger())
 
-	const kernelLabel = "kmm.node.kubernetes.io/kernel-version.full"
-
-	nodeKernelReconciler := controllers.NewNodeKernelReconciler(client, kernelLabel, filter)
+	nodeKernelReconciler := controllers.NewNodeKernelReconciler(client, constants.KernelLabel, filter)
 
 	if err = nodeKernelReconciler.SetupWithManager(mgr); err != nil {
 		setupLogger.Error(err, "unable to create controller", "controller", "NodeKernel")
@@ -135,30 +125,15 @@ func main() {
 
 	metricsAPI := metrics.New()
 	metricsAPI.Register()
-	registryAPI := registry.NewRegistry()
-	helperAPI := build.NewHelper()
-	jobHelperAPI := utils.NewJobHelper(client)
-	makerAPI := job.NewMaker(client, helperAPI, jobHelperAPI, scheme)
-	buildAPI := job.NewBuildManager(client, makerAPI, jobHelperAPI, registryAPI)
-
-	signHelperAPI := sign.NewSignerHelper()
-	signAPI := signjob.NewSignJobManager(
-		client,
-		signjob.NewSigner(client, scheme, signHelperAPI, jobHelperAPI),
-		utils.NewJobHelper(client),
-		registryAPI,
-	)
 
 	rbacAPI := rbac.NewCreator(client, scheme)
-	daemonAPI := daemonset.NewCreator(client, kernelLabel, scheme)
+	daemonAPI := daemonset.NewCreator(client, constants.KernelLabel, scheme)
 	kernelAPI := module.NewKernelMapper()
 	moduleStatusUpdaterAPI := statusupdater.NewModuleStatusUpdater(client, daemonAPI, metricsAPI)
-	preflightStatusUpdaterAPI := statusupdater.NewPreflightStatusUpdater(client)
-	preflightAPI := preflight.NewPreflightAPI(client, buildAPI, signAPI, registryAPI, preflightStatusUpdaterAPI, kernelAPI)
 
-	mc := controllers.NewModuleReconciler(client, buildAPI, signAPI, rbacAPI, daemonAPI, kernelAPI, metricsAPI, filter, moduleStatusUpdaterAPI)
+	mc := controllers.NewModuleReconciler(client, nil, nil, rbacAPI, daemonAPI, kernelAPI, metricsAPI, filter, moduleStatusUpdaterAPI)
 
-	if err = mc.SetupWithManager(mgr, kernelLabel); err != nil {
+	if err = mc.SetupWithManager(mgr, constants.KernelLabel); err != nil {
 		setupLogger.Error(err, "unable to create controller", "controller", "Module")
 		os.Exit(1)
 	}
@@ -168,8 +143,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = controllers.NewPreflightValidationReconciler(client, filter, preflightStatusUpdaterAPI, preflightAPI).SetupWithManager(mgr); err != nil {
-		setupLogger.Error(err, "unable to create controller", "controller", "Preflight")
+	if err = controllers.NewNodeKernelClusterClaimReconciler(client).SetupWithManager(mgr); err != nil {
+		setupLogger.Error(err, "unable to create controller", "controller", "NodeKernelClusterClaim")
 		os.Exit(1)
 	}
 
@@ -189,21 +164,4 @@ func main() {
 		setupLogger.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-func gitCommit() (string, error) {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "", errors.New("build info is not available")
-	}
-
-	const vcsRevisionKey = "vcs.revision"
-
-	for _, s := range bi.Settings {
-		if s.Key == vcsRevisionKey {
-			return s.Value, nil
-		}
-	}
-
-	return "", fmt.Errorf("%s not found in build info settings", vcsRevisionKey)
 }

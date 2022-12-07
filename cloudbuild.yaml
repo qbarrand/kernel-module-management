@@ -2,9 +2,27 @@ steps:
   - name: gcr.io/cloud-builders/docker
     args:
     - build
+    - --build-arg
+    - TARGET=manager
     - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator:$_GIT_TAG
     - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator:latest
     - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - TARGET=manager-hub
+      - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator-hub:$_GIT_TAG
+      - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator-hub:latest
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - TARGET=manager-spoke
+      - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator-spoke:$_GIT_TAG
+      - --tag=gcr.io/$PROJECT_ID/kernel-module-management-operator-spoke:latest
+      - .
   - name: gcr.io/cloud-builders/docker
     args:
       - build
@@ -19,5 +37,9 @@ options:
 images:
   - gcr.io/$PROJECT_ID/kernel-module-management-operator:$_GIT_TAG
   - gcr.io/$PROJECT_ID/kernel-module-management-operator:latest
+  - gcr.io/$PROJECT_ID/kernel-module-management-operator-hub:$_GIT_TAG
+  - gcr.io/$PROJECT_ID/kernel-module-management-operator-hub:latest
+  - gcr.io/$PROJECT_ID/kernel-module-management-operator-spoke:$_GIT_TAG
+  - gcr.io/$PROJECT_ID/kernel-module-management-operator-spoke:latest
   - gcr.io/$PROJECT_ID/kernel-module-management-signimage:$_GIT_TAG
   - gcr.io/$PROJECT_ID/kernel-module-management-signimage:latest

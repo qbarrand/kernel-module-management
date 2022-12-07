@@ -73,7 +73,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 .PHONY: all
-all: generate manager manifests
+all: generate manager manager-hub manager-spoke manifests
 
 ##@ General
 
@@ -95,12 +95,41 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+manifests: controller-gen
+	$(CONTROLLER_GEN) \
+		crd \
+		paths="./..." \
+		output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) \
+		rbac:roleName=manager-role \
+		paths="controllers/module_reconciler.go" \
+		paths="controllers/node_kernel_reconciler.go" \
+		paths="controllers/pod_node_module_reconciler.go" \
+		paths="controllers/preflightvalidation_reconciler.go" \
+		output:artifacts:config=config/rbac
+
 	@for f in config/crd/bases/*.yaml; do \
 		kubectl annotate --overwrite -f $$f --local=true -o yaml api-approved.kubernetes.io="unapproved, testing-only" > $$f.bk; \
 		mv $$f.bk $$f; \
 	done
+
+.PHONY: manifests-hub
+manifests-hub: controller-gen
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config-hub/crd/bases
+	$(CONTROLLER_GEN) \
+		rbac:roleName=manager-role \
+		paths="controllers/managedclustermodule_reconciler.go" \
+		output:artifacts:config=config-hub/rbac
+
+.PHONY: manifests-spoke
+manifests-spoke: controller-gen
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config-spoke/crd/bases
+	$(CONTROLLER_GEN) \
+		rbac:roleName=manager-role \
+		paths="controllers/node_kernel_reconciler.go" \
+		paths="controllers/node_kernel_clusterclaim.go" \
+		paths="controllers/pod_node_module_reconciler.go" \
+		output:artifacts:config=config-spoke/rbac
 
 .PHONY: generate
 generate: controller-gen mockgen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -131,9 +160,14 @@ lint: golangci-lint ## Run golangci-lint against code.
 
 ##@ Build
 
-.PHONY: manager
-manager: ## Build manager binary.
-	go build -o $@
+manager: $(shell find -name "*.go")
+	go build -o $@ ./cmd/manager
+
+manager-hub: $(shell find -name "*.go")
+	go build -o $@ ./cmd/manager-hub
+
+manager-spoke: $(shell find -name "*.go")
+	go build -o $@ ./cmd/manager-spoke
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
