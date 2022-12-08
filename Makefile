@@ -115,11 +115,16 @@ manifests: controller-gen
 
 .PHONY: manifests-hub
 manifests-hub: controller-gen
-	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config-hub/crd/bases
+	$(CONTROLLER_GEN) crd paths="api/v1beta1/managedclustermodule_types.go" output:crd:artifacts:config=config-hub/crd/bases
 	$(CONTROLLER_GEN) \
 		rbac:roleName=manager-role \
 		paths="controllers/managedclustermodule_reconciler.go" \
 		output:artifacts:config=config-hub/rbac
+
+	@#for f in config-hub/crd/bases/*.yaml; do \
+#		kubectl annotate --overwrite -f $$f --local=true -o yaml api-approved.kubernetes.io="unapproved, testing-only" > $$f.bk; \
+#		mv $$f.bk $$f; \
+#	done
 
 .PHONY: manifests-spoke
 manifests-spoke: controller-gen
@@ -248,6 +253,13 @@ bundle: manifests kustomize ## Generate bundle manifests and metadata, then vali
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	kubectl kustomize config/manifests | operator-sdk generate bundle $(BUNDLE_GEN_FLAGS)
 	operator-sdk bundle validate ./bundle
+
+.PHONY: bundle-hub
+bundle-hub: manifests-hub kustomize ## Generate bundle manifests and metadata, then validate generated files.
+	#operator-sdk --verbose generate kustomize manifests --package kernel-module-management-hub --input-dir config-hub/manifests --output-dir config-hub/manifests
+#	cd config-hub/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+#	kubectl kustomize config-hub/manifests | operator-sdk generate bundle $(BUNDLE_GEN_FLAGS)
+#	operator-sdk bundle validate ./bundle
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.

@@ -1,2 +1,3 @@
 # Explicitly include .git in Google Cloud Builds as it is needed by Dockerfile.
 !.git
+bin
