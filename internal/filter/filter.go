@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-logr/logr"
+	hubv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api-hub/v1beta1"
 	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -102,7 +103,7 @@ func (f *Filter) FindModulesForNode(node client.Object) []reconcile.Request {
 
 			requirement, err := labels.NewRequirement(k, selection.Equals, []string{v})
 			if err != nil {
-				logger.Error(err, "could not generate requirement: %v", err)
+				logger.Error(err, "could not generate requirement")
 				return reqs
 			}
 
@@ -132,7 +133,7 @@ func (f *Filter) FindManagedClusterModulesForCluster(cluster client.Object) []re
 
 	logger.Info("Listing all ManagedClusterModules")
 
-	mods := kmmv1beta1.ManagedClusterModuleList{}
+	mods := hubv1beta1.ManagedClusterModuleList{}
 
 	if err := f.client.List(context.Background(), &mods); err != nil {
 		logger.Error(err, "could not list ManagedClusterModules")
@@ -155,7 +156,7 @@ func (f *Filter) FindManagedClusterModulesForCluster(cluster client.Object) []re
 
 			requirement, err := labels.NewRequirement(k, selection.Equals, []string{v})
 			if err != nil {
-				logger.Error(err, "could not generate requirement: %v", err)
+				logger.Error(err, "could not generate requirement")
 				return reqs
 			}
 

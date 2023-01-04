@@ -92,7 +92,7 @@ var _ = Describe("MakeJobTemplate", func() {
 				Labels:       labels,
 				OwnerReferences: []metav1.OwnerReference{
 					{
-						APIVersion:         "kmm.sigs.k8s.io/v1beta1",
+						APIVersion:         "kmm.sigs.x-k8s.io/v1beta1",
 						Kind:               "Module",
 						Name:               moduleName,
 						Controller:         pointer.Bool(true),
@@ -293,7 +293,7 @@ var _ = Describe("MakeJobTemplate", func() {
 				DockerfileConfigMap:  &dockerfileConfigMap,
 			},
 			"--insecure-pull",
-			true,
+			false,
 		),
 		Entry(
 			"BaseImageRegistryTLS.InsecureSkipTLSVerify",
@@ -317,7 +317,7 @@ var _ = Describe("MakeJobTemplate", func() {
 			&kmmv1beta1.TLSOptions{InsecureSkipTLSVerify: true},
 			&kmmv1beta1.Build{DockerfileConfigMap: &dockerfileConfigMap},
 			"--skip-tls-verify",
-			false,
+			true,
 		),
 	)
 

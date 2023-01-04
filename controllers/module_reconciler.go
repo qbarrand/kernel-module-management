@@ -48,6 +48,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
+const ModuleReconcilerName = "Module"
+
 // ModuleReconciler reconciles a Module object
 type ModuleReconciler struct {
 	client.Client
@@ -85,12 +87,12 @@ func NewModuleReconciler(
 	}
 }
 
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=modules/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=kmm.sigs.x-k8s.io,resources=modules,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=kmm.sigs.x-k8s.io,resources=modules/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=create;delete;get;list;patch;watch
 //+kubebuilder:rbac:groups="core",resources=nodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="core",resources=secrets,verbs=get;list;watch
-//+kubebuilder:rbac:groups="core",resources=configmaps,verbs=get;list
+//+kubebuilder:rbac:groups="core",resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups="core",resources=serviceaccounts,verbs=create;delete;get;list;patch;watch
 //+kubebuilder:rbac:groups="batch",resources=jobs,verbs=create;list;watch;delete
 
@@ -403,7 +405,7 @@ func (r *ModuleReconciler) garbageCollect(ctx context.Context,
 	logger.Info("Garbage-collected DaemonSets", "names", deleted)
 
 	// Garbage collect for successfully finished build jobs
-	deleted, err = r.buildAPI.GarbageCollect(ctx, mod.Name, mod.Namespace)
+	deleted, err = r.buildAPI.GarbageCollect(ctx, mod.Name, mod.Namespace, mod)
 	if err != nil {
 		return fmt.Errorf("could not garbage collect build objects: %v", err)
 	}
@@ -448,7 +450,7 @@ func (r *ModuleReconciler) SetupWithManager(mgr ctrl.Manager, kernelLabel string
 				r.filter.ModuleReconcilerNodePredicate(kernelLabel),
 			),
 		).
-		Named("module").
+		Named(ModuleReconcilerName).
 		Complete(r)
 }
 

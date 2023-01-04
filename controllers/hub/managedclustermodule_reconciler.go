@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package hub
 
 import (
 	"context"
 	"fmt"
 
+	hubv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api-hub/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,32 +35,39 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/cluster"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/filter"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/manifestwork"
 )
+
+const ManagedClusterModuleReconcilerName = "ManagedClusterModule"
 
 // ManagedClusterModuleReconciler reconciles a ManagedClusterModule object
 type ManagedClusterModuleReconciler struct {
 	client client.Client
 
 	manifestAPI manifestwork.ManifestWorkCreator
-	filter      *filter.Filter
+	clusterAPI  cluster.ClusterAPI
+
+	filter *filter.Filter
 }
 
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=managedclustermodules,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=managedclustermodules/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=kmm.sigs.k8s.io,resources=managedclustermodules/finalizers,verbs=update
+//+kubebuilder:rbac:groups=hub.kmm.sigs.x-k8s.io,resources=managedclustermodules,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=hub.kmm.sigs.x-k8s.io,resources=managedclustermodules/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=hub.kmm.sigs.x-k8s.io,resources=managedclustermodules/finalizers,verbs=update
 //+kubebuilder:rbac:groups=work.open-cluster-management.io,resources=manifestworks,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cluster.open-cluster-management.io,resources=managedclusters,verbs=get;list;watch
+//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;list;watch;delete
 
 func NewManagedClusterModuleReconciler(
 	client client.Client,
 	manifestAPI manifestwork.ManifestWorkCreator,
+	clusterAPI cluster.ClusterAPI,
 	filter *filter.Filter) *ManagedClusterModuleReconciler {
 	return &ManagedClusterModuleReconciler{
 		client:      client,
 		manifestAPI: manifestAPI,
+		clusterAPI:  clusterAPI,
 		filter:      filter,
 	}
 }
@@ -70,7 +77,7 @@ func (r *ManagedClusterModuleReconciler) Reconcile(ctx context.Context, req ctrl
 
 	logger := log.FromContext(ctx)
 
-	mcm, err := r.getRequestedManagedClusterModule(ctx, req.NamespacedName)
+	mcm, err := r.clusterAPI.RequestedManagedClusterModule(ctx, req.NamespacedName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("ManagedClusterModule deleted")
@@ -82,12 +89,26 @@ func (r *ManagedClusterModuleReconciler) Reconcile(ctx context.Context, req ctrl
 
 	logger.Info("Requested KMMO ManagedClusterModule")
 
-	clusters, err := r.getSelectedManagedClusters(ctx, mcm)
+	clusters, err := r.clusterAPI.SelectedManagedClusters(ctx, mcm)
 	if err != nil {
 		return res, fmt.Errorf("failed to get selected clusters: %v", err)
 	}
 
 	for _, cluster := range clusters.Items {
+		logger := log.FromContext(ctx).WithValues("cluster", cluster.Name)
+		clusterCtx := log.IntoContext(ctx, logger)
+
+		requeue, err := r.clusterAPI.BuildAndSign(clusterCtx, *mcm, cluster)
+		if err != nil {
+			logger.Error(err, "failed to build")
+			continue
+		}
+		if requeue {
+			logger.Info("Build and Sign require a requeue; skipping ManifestWork reconciliation")
+			res.Requeue = true
+			continue
+		}
+
 		mw := &workv1.ManifestWork{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      mcm.Name,
@@ -95,12 +116,13 @@ func (r *ManagedClusterModuleReconciler) Reconcile(ctx context.Context, req ctrl
 			},
 		}
 
-		opRes, err := controllerutil.CreateOrPatch(ctx, r.client, mw, func() error {
+		opRes, err := controllerutil.CreateOrPatch(clusterCtx, r.client, mw, func() error {
 			return r.manifestAPI.SetManifestWorkAsDesired(ctx, mw, *mcm)
 		})
 
 		if err != nil {
-			return res, fmt.Errorf("failed to create/patch ManifestWork for managed cluster %s: %v", cluster.Name, err)
+			logger.Error(err, "failed to create/patch ManifestWork for managed cluster")
+			continue
 		}
 
 		logger.Info("Reconciled ManifestWork", "name", mw.Name, "namespace", mw.Namespace, "result", opRes)
@@ -110,45 +132,27 @@ func (r *ManagedClusterModuleReconciler) Reconcile(ctx context.Context, req ctrl
 		return res, fmt.Errorf("failed to garbage collect ManifestWorks with no matching cluster selector: %v", err)
 	}
 
+	deleted, err := r.clusterAPI.GarbageCollectBuilds(ctx, *mcm)
+	if err != nil {
+		return res, fmt.Errorf("failed to garbage collect build objects: %v", err)
+	}
+	if len(deleted) > 0 {
+		logger.Info("Garbage-collected Build objects", "names", deleted)
+	}
+
 	return res, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ManagedClusterModuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&kmmv1beta1.ManagedClusterModule{}).
+		For(&hubv1beta1.ManagedClusterModule{}).
 		Owns(&workv1.ManifestWork{}).
+		Owns(&batchv1.Job{}).
 		Watches(
 			&source.Kind{Type: &clusterv1.ManagedCluster{}},
 			handler.EnqueueRequestsFromMapFunc(r.filter.FindManagedClusterModulesForCluster),
 			builder.WithPredicates(predicate.LabelChangedPredicate{})).
-		Named("managedclustermodule").
+		Named(ManagedClusterModuleReconcilerName).
 		Complete(r)
-}
-
-func (r *ManagedClusterModuleReconciler) getRequestedManagedClusterModule(
-	ctx context.Context,
-	namespacedName types.NamespacedName) (*kmmv1beta1.ManagedClusterModule, error) {
-
-	mcm := kmmv1beta1.ManagedClusterModule{}
-	if err := r.client.Get(ctx, namespacedName, &mcm); err != nil {
-		return nil, fmt.Errorf("failed to get the ManagedClusterModule %s: %w", namespacedName, err)
-	}
-	return &mcm, nil
-}
-
-func (r *ManagedClusterModuleReconciler) getSelectedManagedClusters(
-	ctx context.Context,
-	mcm *kmmv1beta1.ManagedClusterModule) (*clusterv1.ManagedClusterList, error) {
-
-	clusterList := &clusterv1.ManagedClusterList{}
-
-	opts := []client.ListOption{
-		client.MatchingLabelsSelector{
-			Selector: labels.Set(mcm.Spec.Selector).AsSelector(),
-		},
-	}
-	err := r.client.List(ctx, clusterList, opts...)
-
-	return clusterList, err
 }

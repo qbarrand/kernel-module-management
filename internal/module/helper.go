@@ -17,7 +17,7 @@ func TLSOptions(modSpec kmmv1beta1.ModuleSpec, km kmmv1beta1.KernelMapping) *kmm
 	if km.RegistryTLS != nil {
 		return km.RegistryTLS
 	}
-	return modSpec.ModuleLoader.Container.RegistryTLS
+	return &modSpec.ModuleLoader.Container.RegistryTLS
 }
 
 // AppendToTag adds the specified tag to the image name cleanly, i.e. by avoiding messing up
@@ -41,7 +41,7 @@ func ShouldBeBuilt(modSpec kmmv1beta1.ModuleSpec, km kmmv1beta1.KernelMapping) b
 	return modSpec.ModuleLoader.Container.Build != nil || km.Build != nil
 }
 
-// ShouldBeBuilt indicates whether the specified KernelMapping of the
+// ShouldBeSigned indicates whether the specified KernelMapping of the
 // Module should be signed or not.
 func ShouldBeSigned(modSpec kmmv1beta1.ModuleSpec, km kmmv1beta1.KernelMapping) bool {
 	return modSpec.ModuleLoader.Container.Sign != nil || km.Sign != nil

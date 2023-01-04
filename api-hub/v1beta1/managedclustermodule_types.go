@@ -17,16 +17,20 @@ limitations under the License.
 package v1beta1
 
 import (
+	kmmv1beta1 "github.com/kubernetes-sigs/kernel-module-management/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ManagedClusterModuleSpec defines the desired state of ManagedClusterModule
 type ManagedClusterModuleSpec struct {
 	// ModuleSpec describes how the KMM operator should deploy a Module on those nodes that need it.
-	ModuleSpec ModuleSpec `json:"moduleSpec,omitempty"`
+	ModuleSpec kmmv1beta1.ModuleSpec `json:"moduleSpec,omitempty"`
 
-	// Namespace describes the Spoke namespace, in which the ModuleSpec should be applied.
-	Namespace string `json:"namespace,omitempty"`
+	// SpokeNamespace describes the Spoke namespace, in which the ModuleSpec should be applied.
+	SpokeNamespace string `json:"spokeNamespace,omitempty"`
+
+	// JobNamespace describes the Hub namespace, to which Build and Sign Jobs should be deployed.
+	JobNamespace string `json:"jobNamespace,omitempty"`
 
 	// Selector describes on which managed clusters the ModuleSpec should be applied.
 	Selector map[string]string `json:"selector"`

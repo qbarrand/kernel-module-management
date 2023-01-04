@@ -56,6 +56,8 @@ endif
 
 # Image URL to use all building/pushing image targets
 IMG ?= $(IMAGE_TAG_BASE):latest
+HUB_IMG ?= $(IMAGE_TAG_BASE)-hub:latest
+
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.23
 
@@ -73,7 +75,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 .PHONY: all
-all: generate manager manifests
+all: generate manager manager-hub manifests
 
 ##@ General
 
@@ -96,11 +98,12 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	@for f in config/crd/bases/*.yaml; do \
-		kubectl annotate --overwrite -f $$f --local=true -o yaml api-approved.kubernetes.io="unapproved, testing-only" > $$f.bk; \
-		mv $$f.bk $$f; \
-	done
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./controllers" output:rbac:artifacts:config=config/rbac
+
+	# Hub
+	$(CONTROLLER_GEN) crd paths="./api-hub/..." output:crd:artifacts:config=config/crd-hub/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./controllers/hub" output:rbac:artifacts:config=config/rbac-hub
 
 .PHONY: generate
 generate: controller-gen mockgen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -131,21 +134,31 @@ lint: golangci-lint ## Run golangci-lint against code.
 
 ##@ Build
 
-.PHONY: manager
-manager: ## Build manager binary.
-	go build -o $@
+manager: $(shell find -name "*.go") go.mod go.sum  ## Build manager binary.
+	go build -o $@ ./cmd/manager
+
+manager-hub: $(shell find -name "*.go") go.mod go.sum  ## Build manager-hub binary.
+	go build -o $@ ./cmd/manager-hub
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./main.go
 
 .PHONY: docker-build
-docker-build: unit-test ## Build docker image with the manager.
-	docker build -t $(IMG) .
+docker-build: ## Build docker image with the manager.
+	docker build -t $(IMG) --build-arg TARGET=manager .
+
+.PHONY: docker-build-hub
+docker-build-hub: ## Build docker image with the hub manager.
+	docker build -t $(HUB_IMG) --build-arg TARGET=manager-hub .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push $(IMG)
+
+.PHONY: docker-push-hub
+docker-push-hub: ## Push docker image with the hub manager.
+	docker push $(HUB_IMG)
 
 ##@ Deployment
 
@@ -177,7 +190,7 @@ undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/confi
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 .PHONY: controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.9.2)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.10.0)
 
 GOLANGCI_LINT = $(shell pwd)/bin/golangci-lint
 .PHONY: golangci-lint
@@ -208,12 +221,36 @@ GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
 }
 endef
 
+OPERATOR_SDK = $(shell pwd)/bin/operator-sdk
+.PHONY: operator-sdk
+operator-sdk:
+	@if [ ! -f ${OPERATOR_SDK} ]; then \
+		set -e ;\
+		echo "Downloading ${OPERATOR_SDK}"; \
+		mkdir -p $(dir ${OPERATOR_SDK}) ;\
+		curl -Lo ${OPERATOR_SDK} 'https://github.com/operator-framework/operator-sdk/releases/download/v1.25.2/operator-sdk_linux_amd64'; \
+		chmod +x ${OPERATOR_SDK}; \
+	fi
+
 .PHONY: bundle
-bundle: manifests kustomize ## Generate bundle manifests and metadata, then validate generated files.
-	operator-sdk generate kustomize manifests -q
+bundle: operator-sdk manifests kustomize ## Generate bundle manifests and metadata, then validate generated files.
+	rm -fr ./bundle
+	${OPERATOR_SDK} generate kustomize manifests --apis-dir api
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	kubectl kustomize config/manifests | operator-sdk generate bundle $(BUNDLE_GEN_FLAGS)
-	operator-sdk bundle validate ./bundle
+	kubectl kustomize config/manifests | ${OPERATOR_SDK} generate bundle $(BUNDLE_GEN_FLAGS)
+	${OPERATOR_SDK} bundle validate ./bundle
+
+.PHONY: bundle-hub
+bundle-hub: operator-sdk manifests kustomize ## Generate bundle manifests and metadata, then validate generated files.
+	rm -fr ./bundle
+	${OPERATOR_SDK} generate kustomize manifests \
+		--apis-dir api-hub \
+		--output-dir config/manifests-hub \
+		--package kernel-module-management-hub \
+		--input-dir config/manifests-hub
+	cd config/manager-hub && $(KUSTOMIZE) edit set image controller=$(HUB_IMG)
+	kubectl kustomize config/manifests-hub | ${OPERATOR_SDK} generate bundle --package kernel-module-management-hub $(BUNDLE_GEN_FLAGS)
+	${OPERATOR_SDK} bundle validate ./bundle
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
