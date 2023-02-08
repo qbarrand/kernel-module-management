@@ -263,7 +263,7 @@ var _ = Describe("MakeJobTemplate", func() {
 			false,
 		),
 		Entry(
-			"no secrets at all with build.Selector property",
+			"no secrets at all with build.NodeSelector property",
 			[]v1.LocalObjectReference{},
 			nil,
 			true,

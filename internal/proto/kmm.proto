@@ -1,0 +1,24 @@
+syntax = "proto3";
+option go_package = "github.com/kubernetes-sigs/kernel-module-management/internal/proto";
+
+message DaemonConfigResponse {
+  message Module {
+    string moduleName = 1;
+    string imageName = 2;
+    optional string pullSecret = 3;
+    repeated string modulesLoadingOrder = 4;
+    optional string firmwarePath = 5;
+    optional string dirName = 6;
+  }
+
+  repeated Module modules = 1;
+}
+
+message DaemonConfigRequest {
+  string kernelVersion = 1;
+  string hostName = 2;
+}
+
+service KMM {
+  rpc GetDaemonConfig(DaemonConfigRequest) returns (DaemonConfigResponse) {}
+}

@@ -17,12 +17,19 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"strconv"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/kubernetes-sigs/kernel-module-management/controllers/notifier"
 	"github.com/kubernetes-sigs/kernel-module-management/internal/config"
+	"github.com/kubernetes-sigs/kernel-module-management/internal/proto"
+	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -92,6 +99,33 @@ func main() {
 		managed = false
 	}
 
+	serverAddr := cmd.GetEnvOrFatalError("GRPC_SERVER_ADDR", logger)
+	daemonImage := cmd.GetEnvOrFatalError("RELATED_IMAGES_DAEMON", logger)
+
+	ctx := ctrl.SetupSignalHandler()
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	lis, err := net.Listen("tcp", serverAddr)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+
+	proto.RegisterKMMServer(
+		grpcServer,
+		proto.NewServerImpl(logger.WithName("grpc-server")),
+	)
+
+	go func() {
+		setupLogger.Info("Starting gRPC server", "address", serverAddr)
+
+		if err = grpcServer.Serve(lis); err != nil {
+			cmd.FatalError(setupLogger, err, "GRPC server error")
+		}
+	}()
+
 	setupLogger.Info("Creating manager", "git commit", commit)
 
 	cfg, err := config.ParseFile(configFile)
@@ -101,6 +135,7 @@ func main() {
 
 	options := cfg.ManagerOptions()
 	options.Scheme = scheme
+	options.LeaderElectionNamespace = "default"
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), *options)
 	if err != nil {
@@ -188,6 +223,19 @@ func main() {
 		cmd.FatalError(setupLogger, err, "unable to create webhook", "webhook", "Module")
 	}
 
+	dcfg := controllers.DaemonConfig{
+		Daemon: cfg.Daemon,
+		Image:  daemonImage,
+	}
+
+	n := notifier.New(dcfg)
+
+	dr := controllers.NewDaemonReconciler(client, operatorNamespace, n)
+
+	if err = dr.SetupWithManager(mgr); err != nil {
+		cmd.FatalError(setupLogger, err, "unable to create controller", "name", controllers.DaemonReconciler{})
+	}
+
 	//+kubebuilder:scaffold:builder
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -197,8 +245,34 @@ func main() {
 		cmd.FatalError(setupLogger, err, "unable to set up ready check")
 	}
 
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer watcher.Close()
+
+	if err = watcher.Add(configFile); err != nil {
+		cmd.FatalError(setupLogger, err, "Could not add the config file to the watched files")
+	}
+
+	go func() {
+		for {
+			select {
+			case ev := <-watcher.Events:
+				setupLogger.Info("inotify event", "event", ev)
+				n.Set(dcfg)
+			case err = <-watcher.Errors:
+				setupLogger.Error(err, "inotify error")
+				cancel()
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	setupLogger.Info("starting manager")
-	if err = mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err = mgr.Start(ctx); err != nil {
 		cmd.FatalError(setupLogger, err, "problem running manager")
 	}
 }

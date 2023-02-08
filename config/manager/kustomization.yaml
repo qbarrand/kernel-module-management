@@ -4,10 +4,16 @@ kind: Kustomization
 resources:
 - ../manager-base
 
+patches:
+- path: manager_daemon_patch.yaml
+
 images:
 - name: controller
   newName: gcr.io/k8s-staging-kmm/kernel-module-management-operator
   newTag: latest
+- name: daemon
+  newName: gcr.io/google_containers/pause-amd64
+  newTag: '3.1'
 
 configMapGenerator:
 - files:

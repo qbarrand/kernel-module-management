@@ -5,9 +5,16 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
+
+type Daemon struct {
+	FirmwareLookupPath string            `yaml:"firmwareLookupPath"`
+	NodeSelector       map[string]string `yaml:"nodeSelector"`
+	Tolerations        []v1.Toleration   `yaml:"tolerations"`
+}
 
 type LeaderElection struct {
 	Enabled    bool   `yaml:"enabled"`
@@ -15,6 +22,7 @@ type LeaderElection struct {
 }
 
 type Config struct {
+	Daemon                 Daemon         `yaml:"daemon"`
 	HealthProbeBindAddress string         `yaml:"healthProbeBindAddress"`
 	MetricsBindAddress     string         `yaml:"metricsBindAddress"`
 	LeaderElection         LeaderElection `yaml:"leaderElection"`

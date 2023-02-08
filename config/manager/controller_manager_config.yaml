@@ -2,5 +2,5 @@ healthProbeBindAddress: :8081
 metricsBindAddress: 127.0.0.1:8080
 webhookPort: 9443
 leaderElection:
-  enabled: true
+  enabled: false
   resourceID: kmm.sigs.x-k8s.io
