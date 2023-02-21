@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+option go_package = "github.com/kubernetes-sigs/kernel-module-management/proto";
+
+message Node {
+  string name = 1;
+}
+
+message Module {
+  string k8s_name = 1;
+  string k8s_namespace = 2;
+  string containerImage = 3;
+  string name = 4;
+  repeated string modprobeLoadArgs = 5;
+  repeated string modprobeUnloadArgs = 6;
+  optional string parameters = 7;
+}
+
+message DesiredModules {
+  repeated Module module = 1;
+}
+
+service ControlPlane {
+  rpc GetDesiredModules(Node) returns (DesiredModules);
+}
