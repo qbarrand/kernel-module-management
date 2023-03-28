@@ -190,6 +190,10 @@ deploy-hub: manifests kustomize ## Deploy controller to the K8s cluster specifie
 
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	kubectl delete -k config/kmm --ignore-not-found=$(ignore-not-found)
+
+.PHONY: undeploy-full
+undeploy-full: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	kubectl delete -k $(KUSTOMIZE_CONFIG_DEFAULT) --ignore-not-found=$(ignore-not-found)
 
 .PHONY: undeploy-hub
