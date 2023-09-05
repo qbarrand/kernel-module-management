@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/cmd/util/podcmd"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,8 +52,9 @@ const (
 //+kubebuilder:rbac:groups="core",resources=secrets,verbs=get;list;watch
 
 type NMCReconciler struct {
-	client client.Client
-	helper workerHelper
+	client   client.Client
+	helper   workerHelper
+	recorder record.EventRecorder
 }
 
 func NewNMCReconciler(client client.Client, scheme *runtime.Scheme, workerImage string) *NMCReconciler {
@@ -149,6 +151,8 @@ func (r *NMCReconciler) SetupWithManager(ctx context.Context, mgr manager.Manage
 		}
 	}
 
+	r.recorder = mgr.GetEventRecorderFor(NodeModulesConfigReconcilerName)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(NodeModulesConfigReconcilerName).
 		For(&kmmv1beta1.NodeModulesConfig{}).
@@ -198,8 +202,9 @@ type workerHelper interface {
 }
 
 type workerHelperImpl struct {
-	client client.Client
-	pm     podManager
+	client   client.Client
+	pm       podManager
+	recorder record.EventRecorder
 }
 
 func newWorkerHelper(client client.Client, pm podManager) workerHelper {
@@ -376,6 +381,7 @@ func (w *workerHelperImpl) SyncStatus(ctx context.Context, nmcObj *kmmv1beta1.No
 			deletePod = true
 
 			if p.Labels[actionLabelKey] == WorkerActionUnload {
+				w.recorder.AnnotatedEventf()
 				nmc.RemoveModuleStatus(&nmcObj.Status.Modules, modNamespace, modName)
 				break
 			}
