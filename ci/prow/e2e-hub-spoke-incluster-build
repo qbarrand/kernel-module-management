@@ -3,7 +3,9 @@
 set -euxo pipefail
 
 # Install the `clusteradm` command
-curl -L https://raw.githubusercontent.com/open-cluster-management-io/clusteradm/main/install.sh | bash
+curl -LO https://raw.githubusercontent.com/open-cluster-management-io/clusteradm/main/install.sh
+chmod +x install.sh
+TARGET_VERSION=v0.6.0 ./install.sh
 
 export MINIKUBE=minikube
 export OPERATOR_NAMESPACE=kmm-operator-system
